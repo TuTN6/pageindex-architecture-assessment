@@ -3,7 +3,7 @@
 > **Đối tượng:** CTO / Tech Lead  
 > **Vai trò:** Kiến trúc sư phần mềm cấp Principal & reviewer mã cấp doanh nghiệp  
 > **Ghi chú phạm vi:** Đánh giá này dựa trên **bằng chứng trực tiếp từ các file repo có thể truy cập** trong phiên hiện tại.  
-> **Khoảng trống quan trọng:** `pageindex/page_index.py` (pipeline PDF lõi) và `pageindex/config.yaml` **không truy xuất được** trong phiên này; mọi kết luận phụ thuộc các file này được đánh dấu **Không rõ/Không tìm thấy** kèm bước kiểm chứng.
+> **Ghi chú hiện trạng:** Đã truy xuất `pageindex/page_index.py` và `pageindex/config.yaml`; phần retrieval/tree search hiện nằm trong tài liệu hướng dẫn (`tutorials/`) và chưa thấy module retrieval riêng trong code.
 
 ---
 
@@ -25,25 +25,32 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
 
 - **Bằng chứng:** `run_pageindex.py::__main__ (line 0)` — nhánh `if args.pdf_path:` tạo `opt = config(...)` và gọi `toc_with_page_number = page_index_main(args.pdf_path, opt)` rồi save JSON.
 
-> **Không rõ/Không tìm thấy:** Nội bộ pipeline PDF (parse/TOC-detect/tree build/summarize) vì **không truy xuất được nội dung `pageindex/page_index.py`** trong phiên này.  
-> **Cách kiểm chứng:** Mở file `pageindex/page_index.py` locally và trace từ hàm `page_index_main(...)` (được gọi bởi entrypoint).
+**Luồng nội bộ (theo `page_index_main`)**  
+
+- Validate input (PDF path/BytesIO) + init `JsonLogger`, rồi build `page_list` bằng `get_page_tokens` (text + token count theo page).  
+- `tree_parser` điều phối: `check_toc` → `meta_processor` (process_toc_with_page_numbers / process_toc_no_page_numbers / process_no_toc) → `verify_toc` + fix → `add_preface_if_needed` + `check_title_appearance_in_start_concurrent` → `post_processing` → `process_large_node_recursively`.  
+- Post-processing theo flags: `write_node_id`, `add_node_text`, `generate_summaries_for_structure`, `generate_doc_description` (doc_description chỉ khi `if_add_node_summary == 'yes'`).  
+- Trả về `{doc_name, (doc_description), structure}`.  
+- **Bằng chứng:** `pageindex/page_index.py:1021`, `pageindex/page_index.py:1058`, `pageindex/page_index.py:1083`, `pageindex/utils.py:309`.
 
 ### Luồng chính: Markdown → tree → (tuỳ chọn) summaries → JSON artifact
 
 1. User chạy: `python3 run_pageindex.py --md_path /path/to/doc.md`  
-2. Script dùng `ConfigLoader` để nạp default config (được mô tả là từ `config.yaml`) và merge với args  
+2. Script dùng `ConfigLoader` để nạp default config từ `pageindex/config.yaml` và merge với args  
 3. Gọi `asyncio.run(md_to_tree(...))` để:
    - Parse headings `#..######` (bỏ qua code blocks ```…```)
    - Cắt text theo vùng heading
    - (optional) thinning dựa trên token count
-   - Build tree + node_id
+   - Build tree (node_id được gán ở `build_tree_from_nodes`; nếu `if_add_node_id == 'yes'` thì ghi lại bằng `write_node_id`)
    - (optional) generate summary cho từng node (async gather)
-   - (optional) generate doc_description
+   - (optional) generate doc_description (chỉ khi `if_add_node_summary == 'yes'`)
 4. Lưu output JSON ra `./results/<md_name>_structure.json`
 
 - **Bằng chứng:**  
   - `run_pageindex.py::__main__ (line 0)` — nhánh `elif args.md_path:` gọi `ConfigLoader().load(user_opt)` và `asyncio.run(md_to_tree(...))`, sau đó `json.dump(... ensure_ascii=False)` ra `./results`.  
-  - `pageindex/page_index_md.py::md_to_tree (line 0)` — read file, extract nodes, optional thinning, build tree, optional summary/doc_description, return dict `{doc_name, (doc_description), structure}`.
+  - `pageindex/utils.py:681`, `pageindex/config.yaml:1` — `ConfigLoader` load defaults từ `config.yaml`.  
+  - `pageindex/page_index_md.py:190`, `pageindex/page_index_md.py:261` — build tree + node_id handling.  
+  - `pageindex/page_index_md.py:266` — summary + doc_description gating; `md_to_tree` return schema `{doc_name, (doc_description), structure}`.
 
 ---
 
@@ -53,22 +60,22 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
    - **Bằng chứng:** `run_pageindex.py::__main__ (line 0)`
 2. `pageindex/__init__.py` — bề mặt API public (re-export).  
    - **Bằng chứng:** `pageindex/__init__.py (line 0)`
-3. `pageindex/page_index.py` — **pipeline PDF lõi** (không truy xuất được trong phiên này; cần đọc tại máy).  
-   - **Bằng chứng:** `pageindex/__init__.py (line 0)` re-export; `run_pageindex.py (line 0)` gọi `page_index_main(...)`
+3. `pageindex/page_index.py` — **pipeline PDF lõi** (TOC detection/transform/verify + tree build + summaries).  
+   - **Bằng chứng:** `pageindex/page_index.py:1058` (`page_index_main`), `pageindex/page_index.py:1021` (`tree_parser`)
 4. `pageindex/page_index_md.py` — pipeline Markdown (build tree + thinning + summaries).  
    - **Bằng chứng:** `pageindex/page_index_md.py::md_to_tree (line 0)`
 5. `pageindex/utils.py` — wrapper LLM, đếm token, trích xuất text PDF, JSON helpers, traversal helpers, config loader (tham chiếu).  
    - **Bằng chứng:** `pageindex/utils.py::ChatGPT_API* (line 0)`
-6. `pageindex/config.yaml` — config defaults (không truy xuất được trong phiên này; cần đọc tại máy).  
-   - **Bằng chứng:** `run_pageindex.py (line 0)` comment “Load config with defaults from config.yaml”
+6. `pageindex/config.yaml` — config defaults (model, toc_check_page_num, max_page_num_each_node, ...).  
+   - **Bằng chứng:** `pageindex/config.yaml:1`
 7. `requirements.txt` — bề mặt dependency & mức độ pin phiên bản.  
    - **Bằng chứng:** `README.md (lines 25–27)` hướng dẫn install từ `requirements.txt`
 8. `tests/` — fixtures (PDF/MD) + expected outputs (nếu có) để hiểu schema & determinism.  
    - **Bằng chứng:** `README.md (lines 22–24)` trỏ đến `tests/pdfs` và `tests/results`
 9. `cookbook/*.ipynb` — usage patterns, expected workflow.  
    - **Bằng chứng:** `README.md (lines 20–21)` link notebooks
-10. `tutorials/` — (khả năng) có demo retrieval/tree search (chưa kiểm chứng trong phiên này).  
-    - **Bằng chứng:** Repo structure hiển thị có `tutorials/`
+10. `tutorials/` — có hướng dẫn retrieval/tree search (prompt mẫu).  
+    - **Bằng chứng:** `tutorials/tree-search/README.md:1`
 11. `CHANGELOG.md` — lịch sử thay đổi & breaking changes.  
     - **Bằng chứng:** Repo structure hiển thị có `CHANGELOG.md`
 12. `LICENSE` — compliance.  
@@ -92,8 +99,8 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
   - **Bằng chứng:** `README.md (lines 25–27)`, `pageindex/utils.py (line 0)`
 - Reliability: wrapper LLM trả về `"Error"` string sau max retries (và có return type không nhất quán giữa hàm), rủi ro “silent failure” lan truyền vào pipeline/output.  
   - **Bằng chứng:** `pageindex/utils.py::ChatGPT_API (line 0)`, `pageindex/utils.py::ChatGPT_API_with_finish_reason (line 0)`
-- Observability còn mỏng: script dùng `print(...)`, utils dùng `logging.error(...)` nhưng không thấy cấu hình structured logging/metrics/timing per stage trong phần code truy xuất được.  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/utils.py (line 0)`
+- Observability cơ bản: có `JsonLogger` ghi JSON log ra `./logs`, nhưng vẫn thiếu structured logging/metrics/timing per stage; CLI vẫn dùng `print(...)`.  
+  - **Bằng chứng:** `pageindex/utils.py:309`, `pageindex/page_index.py:1058`, `run_pageindex.py (line 0)`
 - Testing/CI: repo có `tests/` nhưng chưa đánh giá được mức coverage và loại test do hạn chế truy xuất nội dung.  
   - **Bằng chứng:** `README.md (lines 22–24)`
 - Điểm cần ưu tiên: (1) làm rõ boundary & public API, (2) harden LLM layer (prompt-injection, caching, output validation, backoff), (3) kiểm soát concurrency/cost, (4) nâng observability & testability.
@@ -110,8 +117,10 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
 ### Phạm vi đánh giá (đã đọc/đã có bằng chứng trực tiếp)
 
 - Entrypoint & orchestration: `run_pageindex.py`  
+- PDF indexing path: `pageindex/page_index.py`  
 - Markdown indexing path: `pageindex/page_index_md.py`  
 - LLM wrappers + token utilities + PDF text extraction helpers (một phần): `pageindex/utils.py`  
+- Config defaults & loader: `pageindex/config.yaml`, `ConfigLoader`  
 - Public API surface: `pageindex/__init__.py`  
 - Repo usage & options: `README.md`
 
@@ -119,18 +128,14 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
 
 - Repo là framework/pipeline xử lý tài liệu để tạo “PageIndex tree” và hỗ trợ reasoning-based retrieval.
 
-### Không rõ/Không tìm thấy (ảnh hưởng đến độ sâu phân tích)
+### Giới hạn còn lại (ảnh hưởng đến độ sâu phân tích)
 
-- **Không truy xuất được `pageindex/page_index.py`** (core PDF pipeline) trong phiên này → runtime flow chi tiết cho PDF, prompt templates, tree construction logic, schema validation cho PDF path: **Không rõ**.  
-  - **Bằng chứng:** `run_pageindex.py (line 0)` gọi `page_index_main(...)`; `pageindex/__init__.py (line 0)` re-export `.page_index`.
-- **Không truy xuất được `pageindex/config.yaml`** → default config keys/values và config schema: **Không rõ**.  
-  - **Bằng chứng:** `run_pageindex.py (line 0)` comment “Load config with defaults from config.yaml”.
-
-**Cách kiểm chứng tối thiểu để “đóng khoảng trống”:**
-
-- Mở local repo và đọc:
-  - `pageindex/page_index.py` từ hàm `page_index_main(...)` và các prompt gọi LLM
-  - `pageindex/config.yaml` + `ConfigLoader` implementation (trong `pageindex/utils.py`)
+- Retrieval/tree search có tài liệu hướng dẫn trong `tutorials/tree-search/README.md` (prompt mẫu), nhưng chưa thấy module/entrypoint retrieval trong code Python.  
+  - **Bằng chứng:** `tutorials/tree-search/README.md:1`
+- Chưa đọc sâu notebooks `cookbook/` và tài liệu `tutorials/doc-search/*` (chỉ xác minh tồn tại).  
+  - **Bằng chứng:** `cookbook/README.md:1`, `tutorials/doc-search/README.md:1`
+- Chưa đọc chi tiết nội dung `tests/` (chỉ xác minh cấu trúc thư mục).  
+  - **Bằng chứng:** `README.md (lines 22–24)`
 
 ---
 
@@ -140,9 +145,10 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
 
 - **Container A: Tiến trình PageIndex CLI (Python)**  
   - Chạy local, đọc input PDF/MD từ filesystem.  
-  - Gọi **OpenAI Chat Completions API** qua `openai` SDK cho TOC detection / summarization / description (ít nhất đối với MD summaries, chắc chắn; với PDF thì entrypoint gọi `page_index_main` nhưng nội bộ không rõ).  
+  - Gọi **OpenAI Chat Completions API** qua `openai` SDK cho TOC detection/transform/verification và summaries/doc_description (PDF + MD).  
   - Ghi JSON artifacts ra filesystem (`./results`).  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/utils.py::ChatGPT_API (line 0)`
+  - Ghi log JSON per run ra `./logs` qua `JsonLogger`.  
+  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/page_index.py:1058`, `pageindex/utils.py (line 0)`, `pageindex/utils.py:309`
 
 - **Hệ thống ngoài: OpenAI API**  
   - Được gọi qua `openai.OpenAI(...).chat.completions.create(...)`.  
@@ -151,7 +157,8 @@ Repo hiện có một entrypoint chạy end‑to‑end theo kiểu local/self-ho
 - **Kho dữ liệu: Filesystem local**  
   - Input: PDF/MD path  
   - Output: `./results/<name>_structure.json`  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`
+  - Logs: `./logs/*.json` (JsonLogger)  
+  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/utils.py:309`
 
 ### Mermaid — Góc nhìn Container
 
@@ -170,25 +177,22 @@ flowchart LR
 
 1. **CLI Orchestrator**: parse args, validation, rẽ nhánh PDF/MD  
    - **Bằng chứng:** `run_pageindex.py::__main__ (line 0)`
-2. **Markdown Tree Builder**: parse heading, build tree, thinning, sinh summary  
+2. **PDF Index Builder**: `page_index_main` → `tree_parser` → TOC detection/transform/verify → `post_processing` → recursive split; optional summaries/doc_description  
+   - **Bằng chứng:** `pageindex/page_index.py:1058`, `pageindex/page_index.py:1021`
+3. **Markdown Tree Builder**: parse heading, build tree, thinning, sinh summary  
    - **Bằng chứng:** `pageindex/page_index_md.py::md_to_tree (line 0)`
-3. **LLM Client Wrapper**: gọi OpenAI chat sync & async + retry  
+4. **LLM Client Wrapper**: gọi OpenAI chat sync & async + retry  
    - **Bằng chứng:** `pageindex/utils.py::ChatGPT_API`, `ChatGPT_API_async`, `ChatGPT_API_with_finish_reason (line 0)`
-4. **Token Utilities**: đếm token qua `tiktoken.encoding_for_model`  
+5. **Token Utilities**: đếm token qua `tiktoken.encoding_for_model`  
    - **Bằng chứng:** `pageindex/utils.py::count_tokens (line 0)`
-5. **PDF Text Extraction Helpers** (đã thấy): `PyPDF2.PdfReader`, `page.extract_text()`  
+6. **PDF Text Extraction Helpers**: `PyPDF2.PdfReader`, `page.extract_text()`  
    - **Bằng chứng:** `pageindex/utils.py::extract_text_from_pdf`, `get_text_of_pages (line 0)`
-6. **Tree Traversal Helpers**: `structure_to_list`, `write_node_id`, leaf utilities  
+7. **Tree Traversal Helpers**: `structure_to_list`, `write_node_id`, leaf utilities  
    - **Bằng chứng:** `pageindex/utils.py::structure_to_list`, `write_node_id`, `get_leaf_nodes (line 0)`
-
-**Các component được tham chiếu nhưng chưa xác minh được implementation trong phiên này:**
-
-- **PDF Index Builder**: `page_index_main(...)`  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/__init__.py (line 0)`  
-  - **Không rõ:** chi tiết implementation
-- **Config Loader**: `ConfigLoader.load(...)` + `config.yaml`  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`  
-  - **Không rõ:** chi tiết implementation
+8. **Config Loader + Defaults**: `ConfigLoader` + `config.yaml`  
+   - **Bằng chứng:** `pageindex/utils.py:681`, `pageindex/config.yaml:1`
+9. **JsonLogger**: ghi log JSON per run  
+   - **Bằng chứng:** `pageindex/utils.py:309`
 
 ---
 
@@ -196,24 +200,15 @@ flowchart LR
 
 ### 2.4.1 Luồng tạo chỉ mục — PDF
 
-**Luồng (đã biết):**
+**Luồng (theo code):**
 
-1. Validate PDF path + extension  
-2. Build options `opt = config(...)`  
-3. Call `page_index_main(pdf_path, opt)`  
-4. Save JSON to `./results/<pdf>_structure.json`
+1. Validate PDF path/BytesIO, init `JsonLogger`  
+2. Build `page_list` bằng `get_page_tokens` (text + token per page)  
+3. `tree_parser`: `check_toc` → `meta_processor` (process_toc_with_page_numbers / process_toc_no_page_numbers / process_no_toc) → `verify_toc` + fix → `add_preface_if_needed` + `check_title_appearance_in_start_concurrent` → `post_processing` → `process_large_node_recursively`  
+4. Post-processing theo flags: `write_node_id`, `add_node_text`, `generate_summaries_for_structure`, `generate_doc_description` (doc_description chỉ khi summary bật)  
+5. Save JSON to `./results/<pdf>_structure.json`
 
-- **Bằng chứng:** `run_pageindex.py::__main__ (line 0)` nhánh PDF.
-
-**Không rõ (do thiếu code `pageindex/page_index.py`):**
-
-- Parsing/segmentation strategy theo page/section
-- TOC detection logic (nếu có)
-- LLM prompt templates & output validation
-- Node splitting logic theo `--max-pages-per-node`, `--max-tokens-per-node`
-- Caching/checkpoint
-
-**Cách kiểm chứng:** đọc `pageindex/page_index.py` các hàm được gọi (tối thiểu: `page_index_main`).
+- **Bằng chứng:** `run_pageindex.py::__main__ (line 0)`, `pageindex/page_index.py:1021`, `pageindex/page_index.py:1058`, `pageindex/page_index.py:1083`
 
 ### 2.4.2 Luồng tạo chỉ mục — Markdown
 
@@ -223,12 +218,12 @@ flowchart LR
 2. Extract headings, bỏ qua fenced code blocks  
 3. Build node list: `{title, level, line_num, text}`  
 4. Optional thinning: compute token count cho node + descendants; merge nodes dưới ngưỡng  
-5. Build tree (stack-based) và assign `node_id`  
+5. Build tree (stack-based; `node_id` gán ở `build_tree_from_nodes` và có thể ghi lại bằng `write_node_id` nếu `if_add_node_id == 'yes'`)  
 6. Optional: generate summaries (async gather)  
    - leaf: `summary`  
    - non-leaf: `prefix_summary`  
 7. Optional: remove `text` field nếu không yêu cầu  
-8. Optional: generate `doc_description`  
+8. Optional: generate `doc_description` (chỉ khi `if_add_node_summary == 'yes'`)  
 9. Return `{doc_name, (doc_description), structure}`
 
 - **Bằng chứng:**  
@@ -241,11 +236,9 @@ flowchart LR
 
 ### 2.4.3 Luồng truy vấn / tìm kiếm
 
-- **Không tìm thấy / Không rõ.**  
-  Trong phần code truy xuất được (CLI + MD pipeline + utils), **không thấy** API/query path để “tree search” hoặc assemble context trả lời query.
-  - **Bằng chứng:** `README.md (lines 12–16)` mô tả retrieval ở mức concept; không thấy code tương ứng trong các file đã truy xuất.
-
-**Cách kiểm chứng:** scan `tutorials/` và `pageindex/page_index.py` để tìm các entrypoints liên quan query/search (keywords: `search`, `retrieve`, `tree_search`, `query`, `doc_search`).
+- **Có hướng dẫn ở tài liệu, chưa thấy module code.**  
+  Retrieval/tree search được mô tả dưới dạng prompt mẫu trong `tutorials/tree-search/README.md`, nhưng không có entrypoint/module retrieval trong code Python hiện tại.
+  - **Bằng chứng:** `tutorials/tree-search/README.md:1`, `README.md (lines 12–16)`
 
 ### 2.4.4 Luồng lỗi (những gì thấy trực tiếp)
 
@@ -265,17 +258,15 @@ flowchart LR
 | `run_pageindex.py` | Điều phối CLI, validate input, chạy pipeline PDF/MD, ghi output JSON | user CLI | `pageindex` (`import *`), `pageindex.page_index_md.md_to_tree`, `pageindex.utils.ConfigLoader`, `asyncio`, `json`, FS | `__main__ (line 0)` |
 | `pageindex/__init__.py` | Bề mặt API public: re-export | `run_pageindex.py` | `.page_index`, `.page_index_md` | `from .page_index import *` / `md_to_tree (line 0)` |
 | `pageindex/page_index_md.py` | Markdown → nodes → tree; optional thinning; optional summaries/doc_description | `run_pageindex.py` | `.utils` qua `import *`, `asyncio`, `re`, `os` | `md_to_tree`, `build_tree_from_nodes`, `tree_thinning_for_index`, `generate_summaries_for_structure_md (line 0)` |
-| `pageindex/utils.py` | Wrapper LLM (OpenAI), token counting (tiktoken), PDF text extraction (PyPDF2), JSON extraction, tree traversal helpers | `page_index_md.py`, `run_pageindex.py` | `openai`, `tiktoken`, `dotenv`, `PyPDF2`, `yaml`, `asyncio`, v.v. | `ChatGPT_API`, `ChatGPT_API_async`, `count_tokens`, `extract_text_from_pdf`, `structure_to_list`, `write_node_id (line 0)` |
-| `pageindex/page_index.py` | PDF indexing core | `run_pageindex.py` (calls) + `__init__.py` re-export | Không rõ | `page_index_main` referenced (Không rõ impl) |
-| `pageindex/config.yaml` | Default config values | `ConfigLoader.load` (referenced) | N/A | Chỉ được tham chiếu (Không rõ nội dung) |
+| `pageindex/utils.py` | Wrapper LLM (OpenAI), token counting (tiktoken), PDF text extraction (PyPDF2), JSON extraction, tree traversal helpers, `JsonLogger` | `page_index_md.py`, `run_pageindex.py` | `openai`, `tiktoken`, `dotenv`, `PyPDF2`, `yaml`, `asyncio`, v.v. | `ChatGPT_API`, `ChatGPT_API_async`, `count_tokens`, `extract_text_from_pdf`, `structure_to_list`, `write_node_id (line 0)` |
+| `pageindex/page_index.py` | PDF indexing core (TOC detect/transform/verify, tree build, summaries) | `run_pageindex.py` (calls) + `__init__.py` re-export | `.utils`, `asyncio`, `concurrent.futures`, `json`, `math`, `random`, `re` | `page_index_main` (`pageindex/page_index.py:1058`) |
+| `pageindex/config.yaml` | Default config values | `ConfigLoader.load` | N/A | `pageindex/config.yaml:1` |
 | `tests/` | Fixtures + expected outputs | N/A | N/A | Referenced in README |
-| `cookbook/`, `tutorials/` | Ví dụ & hướng dẫn | N/A | N/A | Repo structure |
+| `cookbook/`, `tutorials/` | Ví dụ & hướng dẫn (tree-search/doc-search) | N/A | N/A | `tutorials/tree-search/README.md:1`, `tutorials/doc-search/README.md:1` |
 
 ---
 
 ## 2.6 Đánh giá thuộc tính chất lượng
-
-> Ghi chú: Với PDF pipeline (`pageindex/page_index.py`) và `config.yaml`, nhiều chi tiết sẽ ghi **Không rõ** do không truy xuất được file trong phiên này.
 
 ### 2.6.1 Hiệu năng
 
@@ -283,6 +274,8 @@ flowchart LR
 
 - Markdown summary generation tạo **task cho mọi node** và chạy `asyncio.gather` không giới hạn → nguy cơ bắn quá nhiều request song song (rate-limit, latency spikes).  
   - **Bằng chứng:** `pageindex/page_index_md.py::generate_summaries_for_structure_md (line 0)` — `tasks = [...]` + `await asyncio.gather(*tasks)`
+- PDF pipeline cũng dùng nhiều `asyncio.gather` (check/verify/fix TOC, recursive split) **không có concurrency limit**.  
+  - **Bằng chứng:** `pageindex/page_index.py:92`, `pageindex/page_index.py:834`, `pageindex/page_index.py:1017`
 - Thinning và token count có pattern “scan forward for children” cho từng node → worst-case **O(n²)** theo số heading nodes.  
   - **Bằng chứng:** `pageindex/page_index_md.py::update_node_list_with_text_token_count.find_all_children` + vòng lặp over nodes (line 0)
 - Token counting dùng `tiktoken.encoding_for_model(model)` và encode toàn bộ text → cost theo O(token_count).  
@@ -291,12 +284,12 @@ flowchart LR
 **Rủi ro:**
 
 - Với Markdown dài (n nodes lớn), concurrency + O(n²) thinning có thể gây chậm/timeout hoặc vượt rate limit OpenAI.
-- Với PDF (Không rõ) nhưng khả năng tương tự nếu summary cho nhiều node.
+- Với PDF, các bước LLM song song không giới hạn có thể gây rate-limit/cost spike, đặc biệt khi tài liệu dài.
 
 **Đề xuất (actionable):**
 
 1. **Giới hạn concurrency cho async LLM calls** bằng `asyncio.Semaphore` + batch scheduling.  
-   - Target: `pageindex/page_index_md.py::generate_summaries_for_structure_md`  
+   - Target: `pageindex/page_index_md.py::generate_summaries_for_structure_md`, `pageindex/page_index.py` (check/verify/fix TOC, recursive split)  
    - Effort: **S** | Risk: Low | Impact: High  
    - Bằng chứng: `asyncio.gather` không giới hạn (line 0)
 2. **Thêm caching** theo hash(prompt+model+version) (filesystem cache) để tránh gọi lại khi rerun.  
@@ -418,8 +411,8 @@ flowchart LR
 
 **Hiện trạng:**
 
-- Script dùng `print(...)`; utils dùng `logging.error(...)` nhưng không thấy structured logs/metrics.  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/utils.py (line 0)`
+- Có `JsonLogger` ghi log JSON per run (`./logs`), nhưng CLI vẫn dùng `print(...)` và chưa có structured logs/metrics/traces tập trung.  
+  - **Bằng chứng:** `pageindex/utils.py:309`, `pageindex/page_index.py:1058`, `run_pageindex.py (line 0)`
 - Không thấy stage timing; dù có import `time`.  
   - **Bằng chứng:** `pageindex/utils.py (line 0)` — `import time`
 
@@ -463,8 +456,8 @@ flowchart LR
 
 ### Observability
 
-- Logging rời rạc (`print` + `logging.error`), thiếu metrics/traces.  
-  - **Bằng chứng:** `run_pageindex.py (line 0)`, `pageindex/utils.py (line 0)`
+- Có `JsonLogger` ghi log JSON per run, nhưng thiếu metrics/traces và chuẩn structured logging end-to-end.  
+  - **Bằng chứng:** `pageindex/utils.py:309`, `pageindex/page_index.py:1058`
 
 ---
 
@@ -473,7 +466,7 @@ flowchart LR
 | Rủi ro | Mức độ | Bằng chứng | Giảm thiểu |
 |---|---|---|---|
 | Prompt injection do không có system prompt; doc content có thể “override” hướng dẫn | Cao | `pageindex/utils.py::ChatGPT_API (line 0)` chỉ user role | Thêm system message + delimiting + JSON schema validation |
-| Cost/rate-limit spike do `asyncio.gather` không giới hạn cho summaries | Cao | `pageindex/page_index_md.py::generate_summaries_for_structure_md (line 0)` | Semaphore limit + batching + caching |
+| Cost/rate-limit spike do `asyncio.gather` không giới hạn (MD summaries + PDF TOC checks/recursive split) | Cao | `pageindex/page_index_md.py::generate_summaries_for_structure_md (line 0)`, `pageindex/page_index.py:92` | Semaphore limit + batching + caching |
 | Silent failure: LLM wrapper trả `"Error"` thay vì raise; return type không nhất quán | Cao | `pageindex/utils.py::ChatGPT_API (line 0)`, `ChatGPT_API_with_finish_reason (line 0)` | Raise typed exceptions + consistent return types + fail fast |
 | Coupling cao do wildcard imports/exports; khó test/refactor | Trung bình/Cao | `run_pageindex.py (line 0)`, `pageindex/__init__.py (line 0)`, `pageindex/page_index_md.py (line 0)` | Explicit imports + stable public API module |
 | Global side effects: `load_dotenv()` tại import time | Trung bình | `pageindex/utils.py (line 0)` | Move env loading to entrypoint; validate config explicitly |
@@ -481,7 +474,7 @@ flowchart LR
 | PDF extraction chất lượng phụ thuộc PyPDF2 `extract_text()` (known limitations) | Trung bình | `pageindex/utils.py::extract_text_from_pdf (line 0)` | Add extractor strategy + fallback (PyMuPDF/vision) |
 | Thiếu checkpoint/resume; fail mid-run phải rerun tốn token | Trung bình | `run_pageindex.py (line 0)` chỉ save cuối | Stage outputs + resume + cache |
 | Schema output không versioned/validated | Trung bình | `pageindex/page_index_md.py::md_to_tree (line 0)` trả dict tự do | Define schema_version + Pydantic validation |
-| Config defaults phụ thuộc `config.yaml` nhưng file không load được trong phiên này | Thấp/Trung bình | `run_pageindex.py (line 0)` nhắc config.yaml + `ConfigLoader` | Document schema + validate + surface config in CLI help |
+| Retrieval/tree-search chỉ ở tutorial (prompt mẫu), chưa có module/entrypoint code → kỳ vọng OSS end-to-end có thể lệch | Thấp/Trung bình | `tutorials/tree-search/README.md:1` | Nâng prompt mẫu thành module/script có test |
 
 ---
 
@@ -501,11 +494,11 @@ flowchart LR
    - Effort: **S** | Risk: Medium | Impact: High  
    - **Bằng chứng:** messages chỉ user role (line 0)
 
-3. **Giới hạn concurrency cho async summaries**  
+3. **Giới hạn concurrency cho async LLM calls (MD + PDF)**  
    - Mục tiêu: tránh rate limit/cost spike  
-   - Thay đổi: `pageindex/page_index_md.py::generate_summaries_for_structure_md`  
+   - Thay đổi: `pageindex/page_index_md.py::generate_summaries_for_structure_md`, `pageindex/page_index.py` (check/verify/fix TOC, recursive split)  
    - Effort: **S** | Risk: Low | Impact: High  
-   - **Bằng chứng:** `asyncio.gather(*tasks)` không limit (line 0)
+   - **Bằng chứng:** `pageindex/page_index_md.py::generate_summaries_for_structure_md (line 0)`, `pageindex/page_index.py:92`
 
 4. **Bỏ wildcard imports ở entrypoint và MD module**  
    - Mục tiêu: giảm coupling, dễ static analysis  
@@ -559,11 +552,11 @@ flowchart LR
    - Effort: **M/L** | Risk: Medium | Impact: High  
    - **Bằng chứng:** thiếu observability (run_pageindex line 0; utils line 0)
 
-3. **Retrieval package (nếu repo muốn cover end-to-end)**  
-   - Mục tiêu: hiện thực hóa “tree search / reasoning retrieval” trong OSS (nếu chưa có)  
-   - Thay đổi: thêm module `retrieval/` + interfaces + examples  
+3. **Retrieval package (nâng từ tutorial lên code)**  
+   - Mục tiêu: biến prompt mẫu tree-search thành module/entrypoint có test  
+   - Thay đổi: thêm module `retrieval/` hoặc script CLI, tái dùng prompt trong `tutorials/tree-search/README.md`  
    - Effort: **L** | Risk: Medium/High | Impact: High  
-   - **Bằng chứng:** README mô tả retrieval nhưng chưa thấy trong code đã truy xuất (README lines 12–16)
+   - **Bằng chứng:** `tutorials/tree-search/README.md:1`
 
 ---
 
@@ -573,10 +566,241 @@ flowchart LR
 2. `pageindex/__init__.py` — re-export public API (line 0)  
 3. `pageindex/page_index_md.py` — `md_to_tree`, thinning, summaries (line 0)  
 4. `pageindex/utils.py` — `count_tokens`, `ChatGPT_API*`, PDF extraction helpers, JSON helpers (line 0–1)  
-5. `README.md` — usage, deployment options, required `.env` key, references to tests/results (lines 8–31)
+5. `pageindex/page_index.py` — PDF pipeline core (`page_index_main`, `tree_parser`)  
+6. `pageindex/config.yaml` — default config values  
+7. `tutorials/tree-search/README.md` — tree-search prompt guidance  
+8. `tutorials/doc-search/README.md` — doc-search guidance  
+9. `cookbook/README.md` — notebooks list  
+10. `README.md` — usage, deployment options, required `.env` key, references to tests/results (lines 8–31)
 
 ---
 
+## 3) Data Flow Overview (theo mẫu SkyTrans)
+
+### 3.1 Mục tiêu và phạm vi
+
+Tài liệu mô tả luồng dữ liệu end-to-end của PageIndex (local CLI), bao gồm:
+
+1) khởi chạy & cấu hình  
+2) nạp tài liệu (PDF/Markdown)  
+3) xử lý LLM để tạo cây PageIndex + summary/doc_description (nếu bật)  
+4) xuất JSON kết quả  
+5) truy vấn/retrieval (theo tutorial)  
+6) logging (PDF pipeline) và lưu trữ local
+
+**Ngoài phạm vi:** PageIndex Chat/MCP/API cloud services, pipeline OCR/vision, retrieval/tree-search (chỉ có tutorial), hạ tầng CI/CD.
+
+### 3.2 Quy ước
+
+- **Tác nhân/Hệ thống:** User, PageIndex CLI (`run_pageindex.py`), PDF Pipeline (`page_index_main`), Markdown Pipeline (`md_to_tree`), Local FS (`./results`, `./logs`), OpenAI API (LLM), ConfigLoader (`config.yaml`).
+- **Dữ liệu:** “Nội dung” = text trích xuất từ PDF / text theo heading của Markdown. “Metadata” = options, node_id, page/line indices, token counts, status. “Artifact” = JSON tree output.
+- **Nguyên tắc xử lý & lưu trữ:** tài liệu được xử lý local; nội dung có thể được gửi ra OpenAI API trong các bước TOC/summary; output lưu vào filesystem; không thấy cơ chế retention tự động trong code hiện tại.
+
+---
+
+### 3.3 Khởi chạy & chọn pipeline (PDF / Markdown)
+
+#### 3.3.1 Mô tả ngắn
+
+- User chạy CLI với `--pdf_path` hoặc `--md_path`; CLI validate input.
+- PDF: options được build trực tiếp từ args.
+- Markdown: options merge với defaults từ `config.yaml` bằng `ConfigLoader`.
+- Pipeline nhận `opt` và route sang `page_index_main` (PDF) hoặc `md_to_tree` (Markdown).
+
+#### 3.3.2 Mermaid (sequence)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant CLI as PageIndex CLI
+  participant FS as Local FS
+  participant CFG as ConfigLoader/config.yaml
+  participant PDF as PDF Pipeline
+  participant MD as Markdown Pipeline
+
+  User->>CLI: Run --pdf_path/--md_path
+  CLI->>FS: Validate file exists
+  alt PDF
+    CLI->>PDF: page_index_main(doc, opt)
+  else Markdown
+    CLI->>CFG: Load defaults + merge options
+    CFG-->>CLI: Merged opt
+    CLI->>MD: md_to_tree(md_path, opt)
+  end
+```
+
+---
+
+### 3.4 Luồng tạo PageIndex — PDF (end-to-end)
+
+#### 3.4.1 Mô tả ngắn
+
+- Pipeline đọc PDF, trích xuất text theo page + đếm token.
+- Thực hiện TOC detection/transform/verify và xây cây (tree_parser); các bước này gọi OpenAI LLM.
+- Post-processing: add `node_id`, `node_text`, summary, `doc_description` theo flags.
+- Trả về JSON structure; CLI ghi ra `./results/<pdf>_structure.json`.
+- `JsonLogger` ghi log JSON per run vào `./logs`.
+
+#### 3.4.2 Mermaid (sequence)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant CLI as PageIndex CLI
+  participant PDF as PDF Pipeline
+  participant FS as Local FS
+  participant LLM as OpenAI Chat Completions
+  participant Log as JsonLogger (./logs)
+
+  User->>CLI: Run --pdf_path doc.pdf
+  CLI->>PDF: page_index_main(doc, opt)
+  PDF->>FS: Read PDF bytes
+  PDF->>PDF: Extract text + count tokens
+  PDF->>LLM: TOC detect/transform/verify + summaries (optional)
+  LLM-->>PDF: TOC tree + summaries
+  PDF->>Log: Write JSON logs
+  PDF-->>CLI: Return {doc_name, structure, doc_description?}
+  CLI->>FS: Write ./results/doc_structure.json
+  User->>FS: Open JSON output
+```
+
+---
+
+### 3.5 Luồng tạo PageIndex — Markdown (end-to-end)
+
+#### 3.5.1 Mô tả ngắn
+
+- CLI đọc file `.md`, parser tách heading (`#..######`) và text theo vùng; bỏ qua code blocks.
+- (Optional) thinning theo ngưỡng token.
+- Build tree (stack-based); thêm `node_id` nếu bật.
+- (Optional) gọi OpenAI LLM để tạo summary/prefix_summary và `doc_description`.
+- Trả về JSON structure; CLI ghi ra `./results/<md>_structure.json`.
+
+#### 3.5.2 Mermaid (sequence)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant CLI as PageIndex CLI
+  participant FS as Local FS
+  participant MD as Markdown Pipeline
+  participant LLM as OpenAI Chat Completions
+
+  User->>CLI: Run --md_path doc.md
+  CLI->>FS: Read markdown
+  CLI->>MD: md_to_tree(md_path, opt)
+  MD->>MD: Parse headings + slice text
+  MD->>MD: Optional thinning + build tree
+  MD->>LLM: Summaries/doc_description (optional)
+  LLM-->>MD: Summaries
+  MD-->>CLI: Return {doc_name, structure, doc_description?}
+  CLI->>FS: Write ./results/doc_structure.json
+  User->>FS: Open JSON output
+```
+
+---
+
+### 3.6 Trả kết quả & lưu trữ local
+
+#### 3.6.1 Mô tả ngắn
+
+- Output cuối cùng luôn là JSON tree (có thể kèm `doc_description`).
+- Kết quả lưu tại `./results/*.json`; người dùng tự tải/đọc.
+- Không có API server hoặc DB trong repo hiện tại.
+
+#### 3.6.2 Mermaid (sequence)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant CLI as PageIndex CLI
+  participant FS as Local FS
+
+  CLI->>FS: Write ./results/<name>_structure.json
+  User->>FS: Read JSON artifact
+```
+
+---
+
+### 3.7 Logging (JSON logs)
+
+#### 3.7.1 Mô tả ngắn
+
+- PDF pipeline khởi tạo `JsonLogger` và ghi log JSON per run vào `./logs`.
+- Markdown pipeline hiện không ghi `JsonLogger` (chỉ có stdout từ CLI).
+- Log có thể chứa metadata và một số nội dung trung gian (ví dụ TOC).
+
+#### 3.7.2 Mermaid (sequence)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant PDF as PDF Pipeline
+  participant Log as JsonLogger (./logs)
+
+  PDF->>Log: Append log entries
+  Log->>Log: Write JSON file
+```
+
+---
+
+### 3.8 Truy vấn / Retrieval (theo tutorial, chưa có module trong repo)
+
+#### 3.8.1 Mô tả ngắn
+
+- Repo hiện không có module query/retrieval; hướng dẫn chỉ có trong `tutorials/`.
+- Input truy vấn là **query + PageIndex tree JSON** (và summary/doc_description nếu đã tạo).
+- Tree search dùng LLM để chọn `node_id` liên quan; kết quả là danh sách node.
+- Với nhiều tài liệu, tutorial gợi ý các bước chọn `doc_id` (description/metadata/semantic), sau đó gọi **PageIndex Retrieval API** (ngoài repo).
+- Có thể bổ sung “preference/expert knowledge” vào prompt tree search để ưu tiên node cụ thể.
+
+#### 3.8.2 Mermaid (sequence) — Tree Search trên 1 tài liệu
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant Orchestrator as Query Orchestrator (custom)
+  participant FS as Local FS (tree JSON)
+  participant LLM as OpenAI Chat Completions
+
+  User->>Orchestrator: Query
+  Orchestrator->>FS: Load PageIndex tree JSON
+  Orchestrator->>LLM: Tree-search prompt (query + tree)
+  LLM-->>Orchestrator: node_id list
+  Orchestrator-->>User: Relevant node_id (and/or extracted sections)
+```
+
+#### 3.8.3 Mermaid (sequence) — Document Search (multi-doc, tutorial)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User
+  participant Selector as Doc Selection Layer
+  participant Store as Metadata/Descriptions/Vector DB
+  participant LLM as OpenAI Chat Completions
+  participant API as PageIndex Retrieval API (external)
+
+  User->>Selector: Query
+  Selector->>Store: Retrieve candidates (metadata/description/semantic)
+  Selector->>LLM: Rank/select doc_ids (optional)
+  LLM-->>Selector: Relevant doc_ids
+  Selector->>API: Retrieve with doc_id list
+  API-->>Selector: Relevant nodes/sections
+  Selector-->>User: Results
+```
+
+---
+
+### 3.9 Xóa dữ liệu/Retention (hiện không có)
+
+- Repo hiện tại không có job tự động xóa `./results`/`./logs`; việc dọn dữ liệu là thao tác thủ công của người dùng.
+
 ## Ghi chú về giới hạn “line numbers”
 
-Một số file Python trong phiên này được hiển thị theo kiểu “gộp” (ví dụ: line 0 rất dài). Đây là giới hạn cách nội dung được cung cấp trong môi trường review này. Vì vậy, citations dùng `line 0`/`line 1` là theo **điểm bắt đầu của file** trong dữ liệu hiện có, kèm theo **symbol/function** để định danh chính xác.
+Một số trích dẫn cũ dùng `line 0`/`line 1` do file từng được hiển thị dạng “gộp”. Các trích dẫn mới dùng line numbers thực tế khi có thể (qua `nl -ba`), kèm theo **symbol/function** để định danh chính xác.
